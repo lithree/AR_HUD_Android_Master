@@ -40,6 +40,7 @@ android {
         }
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -49,7 +50,13 @@ android {
 }
 
 dependencies {
-    implementation("com.google.android.gms:play-services-maps:19.0.0")
+    implementation("com.google.android.libraries.navigation:navigation:7.8.0") {
+        exclude(group = "org.chromium.net", module = "cronet-fallback")
+    }
+    implementation("androidx.fragment:fragment-ktx:1.8.9")
+
+    // vvv ADD this line anywhere in the dependencies block vvv
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
