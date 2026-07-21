@@ -7,15 +7,18 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Android 11 (API 30) and below: BLE scanning required location permission -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!-- Required for Navigation SDK and Location services -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Required for network requests and routing API communication -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Declares that BLE hardware is required to install/run this app.
-         Set required="false" if you also want it installable on devices without BLE. -->
+    <!-- Declares that BLE hardware is required to install and run this app -->
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
@@ -30,6 +33,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ARHUD">
 
+        <!-- Injects the Google Maps and Navigation API Key from build configuration -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="${mapsApiKey}" />
