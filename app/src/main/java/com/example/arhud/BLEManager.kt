@@ -11,6 +11,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 
 /**
@@ -23,10 +27,19 @@ import java.util.UUID
  *  3. Pack turn/lane data computed by the solver into a compact ByteArray
  *     and write it to the target Characteristic.
  */
-class BleManager(private val context: Context) {
+class BleManager private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "BleManager"
+
+        @Volatile
+        private var INSTANCE: BleManager? = null
+
+        fun getInstance(context: Context): BleManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: BleManager(context.applicationContext).also { INSTANCE = it }
+            }
+        }
 
         // TODO: Replace with the actual UUIDs defined on the ESP32 firmware side
         val SERVICE_UUID: UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
@@ -57,6 +70,15 @@ class BleManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isScanning = false
 
+    private val _status = MutableStateFlow("Disconnected")
+    val status = _status.asStateFlow()
+
+    private val _isConnected = MutableStateFlow(false)
+    val isConnected = _isConnected.asStateFlow()
+
+    private val _errors = MutableSharedFlow<String>()
+    val errors = _errors.asSharedFlow()
+
     // Simple write queue to avoid overlapping GATT write operations
     // (BLE only allows one outstanding GATT operation at a time)
     private val writeQueue = ArrayDeque<ByteArray>()
@@ -72,6 +94,12 @@ class BleManager(private val context: Context) {
     }
 
     var callback: BleCallback? = null
+
+    private fun reportError(message: String) {
+        Log.e(TAG, message)
+        _status.value = "Error: $message"
+        callback?.onError(message)
+    }
 
     // ---------------------------------------------------------------------
     // Scanning
@@ -100,22 +128,26 @@ class BleManager(private val context: Context) {
         if (isScanning) return
 
         if (!hasScanPermission()) {
-            callback?.onError("Missing BLE permission — request it before scanning")
+            _status.value = "Missing BLE permission"
+            reportError("Missing BLE permission — request it before scanning")
             return
         }
 
         val adapter = bluetoothAdapter ?: run {
-            callback?.onError("Bluetooth is not supported on this device")
+            _status.value = "Bluetooth not supported"
+            reportError("Bluetooth is not supported on this device")
             return
         }
         if (!adapter.isEnabled) {
-            callback?.onError("Bluetooth is disabled")
+            _status.value = "Bluetooth disabled"
+            reportError("Bluetooth is disabled")
             return
         }
 
         bleScanner = adapter.bluetoothLeScanner
         if (bleScanner == null) {
-            callback?.onError("No BLE scanner available on this device")
+            _status.value = "No BLE scanner"
+            reportError("No BLE scanner available on this device")
             return
         }
 
@@ -130,16 +162,19 @@ class BleManager(private val context: Context) {
 
         try {
             isScanning = true
+            _status.value = "Scanning..."
             bleScanner?.startScan(filters, settings, scanCallback)
             // Auto-stop scan after timeout to save battery
             mainHandler.postDelayed({ stopScan() }, SCAN_TIMEOUT_MS)
         } catch (e: SecurityException) {
             isScanning = false
-            callback?.onError("Permission denied at runtime: ${e.message}")
+            _status.value = "Permission denied"
+            reportError("Permission denied at runtime: ${e.message}")
         } catch (e: IllegalStateException) {
             // Thrown when the Bluetooth stack itself isn't ready — common on emulators
             isScanning = false
-            callback?.onError("Bluetooth stack not ready: ${e.message}")
+            _status.value = "Bluetooth stack error"
+            reportError("Bluetooth stack not ready: ${e.message}")
         }
     }
 
@@ -157,6 +192,7 @@ class BleManager(private val context: Context) {
             // Optional extra filter by advertised name, in case multiple
             // devices expose the same service UUID
             if (device.name == TARGET_DEVICE_NAME) {
+                _status.value = "Device found: ${device.name ?: "Unknown"}. Connecting..."
                 callback?.onScanFound(device)
                 stopScan()
                 connect(device)
@@ -165,7 +201,7 @@ class BleManager(private val context: Context) {
 
         override fun onScanFailed(errorCode: Int) {
             isScanning = false
-            callback?.onError("Scan failed, error code: $errorCode")
+            reportError("Scan failed, error code: $errorCode")
         }
     }
 
@@ -181,10 +217,13 @@ class BleManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
+        stopScan()
         bluetoothGatt?.disconnect()
         bluetoothGatt?.close()
         bluetoothGatt = null
         targetCharacteristic = null
+        _status.value = "Disconnected"
+        _isConnected.value = false
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -194,10 +233,13 @@ class BleManager(private val context: Context) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.d(TAG, "Connected to GATT server, discovering services...")
+                    _status.value = "Discovering services..."
                     gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.d(TAG, "Disconnected from GATT server")
+                    _status.value = "Disconnected"
+                    _isConnected.value = false
                     callback?.onDisconnected()
                     gatt.close()
                 }
@@ -206,16 +248,20 @@ class BleManager(private val context: Context) {
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                callback?.onError("Service discovery failed, status: $status")
+                _status.value = "Service discovery failed"
+                reportError("Service discovery failed, status: $status")
                 return
             }
             val service = gatt.getService(SERVICE_UUID)
             targetCharacteristic = service?.getCharacteristic(CHARACTERISTIC_UUID)
 
             if (targetCharacteristic == null) {
-                callback?.onError("Target characteristic not found")
+                _status.value = "Target characteristic not found"
+                reportError("Target characteristic not found")
                 return
             }
+            _status.value = "Connected"
+            _isConnected.value = true
             callback?.onConnected()
         }
 
@@ -312,7 +358,7 @@ class BleManager(private val context: Context) {
         if (writeQueue.isEmpty()) return
         val gatt = bluetoothGatt ?: return
         val characteristic = targetCharacteristic ?: run {
-            callback?.onError("Characteristic not ready, cannot write")
+            reportError("Characteristic not ready, cannot write")
             return
         }
 
@@ -328,7 +374,7 @@ class BleManager(private val context: Context) {
         val success = gatt.writeCharacteristic(characteristic)
         if (!success) {
             isWriting = false
-            callback?.onError("writeCharacteristic() returned false")
+            reportError("writeCharacteristic() returned false")
         }
     }
 

@@ -50,6 +50,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".NavigationActivity"
+            android:exported="false"
+            android:label="Navigation"
+            android:theme="@style/Theme.ARHUD"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 
 </manifest>
