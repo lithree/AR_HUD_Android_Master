@@ -334,6 +334,34 @@ class BleManager private constructor(private val context: Context) {
         enqueueWrite(frame)
     }
 
+    /**
+     * Sends heading (angle) and distance to the current maneuver using the 
+     * firmware-compatible 8-byte Command 0x01 structure.
+     * 
+     * Heading (0-3600) is split across turnDirection and laneIndex fields.
+     * Distance is sent as a 16-bit value in the distanceToTurn field.
+     */
+    fun sendNavigationData(heading: Float, distanceMeters: Int) {
+        val scaledHeading = (heading * 10).toInt().coerceIn(0, 3600)
+        val distance = distanceMeters.coerceIn(0, 0xFFFF)
+
+        // Packet format: [0xAA][0x01][H_MSB][H_LSB][0x00][D_MSB][D_LSB][CRC]
+        val payload = byteArrayOf(
+            0xAA.toByte(),
+            0x01, // Command 0x01 as expected by firmware
+            ((scaledHeading shr 8) and 0xFF).toByte(), // H_MSB -> turn_direction
+            (scaledHeading and 0xFF).toByte(),        // H_LSB -> lane_index
+            0x00,                                      // placeholder -> total_lanes
+            ((distance shr 8) and 0xFF).toByte(),      // D_MSB -> distance_to_turn
+            (distance and 0xFF).toByte()               // D_LSB -> distance_to_turn
+        )
+
+        val checksum = computeChecksum(payload, startIndex = 1)
+        val frame = payload + checksum
+
+        enqueueWrite(frame)
+    }
+
     private fun computeChecksum(data: ByteArray, startIndex: Int): Byte {
         var xor = 0
         for (i in startIndex until data.size) {

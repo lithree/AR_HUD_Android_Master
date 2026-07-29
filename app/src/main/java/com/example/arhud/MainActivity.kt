@@ -35,47 +35,18 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
 import com.example.arhud.ui.theme.ARHUDTheme
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var bleManager: BleManager
-    private var sendJob: Job? = null
-    private var bleCounter = 0
-
-    private fun startPeriodicSending() {
-        sendJob?.cancel()
-        sendJob = lifecycleScope.launch {
-            bleManager.isConnected.collectLatest { isConnected ->
-                if (isConnected) {
-                    while (true) {
-                        bleManager.sendTurnAndLaneData(bleCounter++, 0, 2, 100)
-                        delay(1000)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun stopPeriodicSending() {
-        sendJob?.cancel()
-        sendJob = null
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         bleManager = BleManager.getInstance(this)
         
-        // We can still use the callback for specific events if needed, 
-        // but status is now in StateFlow
-        startPeriodicSending()
-
         checkAndRequestPermissions()
 
         enableEdgeToEdge()

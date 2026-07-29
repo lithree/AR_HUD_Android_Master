@@ -57,6 +57,10 @@
             android:label="Navigation"
             android:theme="@style/Theme.ARHUD"
             android:windowSoftInputMode="adjustResize" />
+
+        <service
+            android:name=".NavUpdateService"
+            android:exported="false" />
     </application>
 
 </manifest>
