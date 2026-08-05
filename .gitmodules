@@ -1,3 +1,3 @@
 [submodule "firmware"]
 	path = firmware
-	url = https://github.com/lithree/ESP32_BMX055_IIC.git
+	url = https://github.com/mad0coding/ARHUD-ESP32S3
