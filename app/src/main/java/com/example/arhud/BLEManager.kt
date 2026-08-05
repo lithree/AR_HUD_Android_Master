@@ -18,6 +18,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 
 /**
+ * Data class representing IMU angles in degrees.
+ */
+data class ImuData(val pitch: Int, val roll: Int, val yaw: Int)
+
+/**
  * BleManager
  *
  * Responsible for the wireless data link between the phone and the ESP32.
@@ -75,6 +80,9 @@ class BleManager private constructor(private val context: Context) {
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
+
+    private val _imuData = MutableStateFlow<ImuData?>(null)
+    val imuData = _imuData.asStateFlow()
 
     private val _errors = MutableSharedFlow<String>()
     val errors = _errors.asSharedFlow()
@@ -260,9 +268,34 @@ class BleManager private constructor(private val context: Context) {
                 reportError("Target characteristic not found")
                 return
             }
+
+            // Enable notifications for this characteristic
+            enableNotifications(gatt, targetCharacteristic!!)
+
             _status.value = "Connected"
             _isConnected.value = true
             callback?.onConnected()
+        }
+
+        /**
+         * Core GATT callback for receiving asynchronous updates from the ESP32
+         * when notifications are enabled.
+         */
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            handleIncomingData(characteristic.value)
+        }
+
+        // Android 13+ (API 33) version of the callback
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            handleIncomingData(value)
         }
 
         override fun onCharacteristicWrite(
@@ -275,6 +308,69 @@ class BleManager private constructor(private val context: Context) {
             isWriting = false
             processNextWrite() // continue draining the queue
         }
+    }
+
+    /**
+     * Configures the GATT client to receive asynchronous updates (notifications)
+     * from the ESP32 for the target characteristic.
+     */
+    @SuppressLint("MissingPermission")
+    private fun enableNotifications(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        val success = gatt.setCharacteristicNotification(characteristic, true)
+        if (!success) {
+            Log.e(TAG, "Failed to enable local notification for characteristic")
+            return
+        }
+
+        val descriptor = characteristic.getDescriptor(CCCD_UUID)
+        if (descriptor != null) {
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            val writeSuccess = gatt.writeDescriptor(descriptor)
+            if (!writeSuccess) {
+                Log.e(TAG, "Failed to write CCCD descriptor to enable notifications")
+            }
+        } else {
+            Log.e(TAG, "CCCD descriptor not found for characteristic")
+        }
+    }
+
+    /**
+     * Unpacks the 10-bit packed IMU data received from the ESP32.
+     * Expected format: [0xAA][P_MSB][P_LSB/R_MSB][R_LSB/Y_MSB][Y_LSB][0x00][0x00][0x55]
+     * Actually, it's 30 bits packed into 4 bytes (indices 1..4).
+     */
+    private fun handleIncomingData(data: ByteArray?) {
+        if (data == null || data.size < 8) return
+
+        // Verify start and end frames
+        val header = data[0].toInt() and 0xFF
+        val footer = data[7].toInt() and 0xFF
+        if (header != 0xAA || footer != 0x55) {
+            Log.w(TAG, "Received invalid frame sync: Header=0x${Integer.toHexString(header)}, Footer=0x${Integer.toHexString(footer)}")
+            return
+        }
+
+        // Bytes 1, 2, 3, 4 contain the 30 bits
+        val b1 = data[1].toInt() and 0xFF
+        val b2 = data[2].toInt() and 0xFF
+        val b3 = data[3].toInt() and 0xFF
+        val b4 = data[4].toInt() and 0xFF
+
+        // Reconstruct the 32-bit container (top 2 bits are unused/reserved)
+        val packed30bit = (b1 shl 24) or (b2 shl 16) or (b3 shl 8) or b4
+
+        // Extract 10-bit fields
+        val pitch10bit = (packed30bit shr 20) and 0x3FF
+        val roll10bit = (packed30bit shr 10) and 0x3FF
+        val yaw10bit = packed30bit and 0x3FF
+
+        // Convert back to signed degrees (offset was +180 for pitch/roll)
+        val pitch = pitch10bit - 180
+        val roll = roll10bit - 180
+        val yaw = yaw10bit // Yaw was 0-1023 mapping for 0-360 range
+
+        Log.i(TAG, "IMU Data: Pitch=$pitch, Roll=$roll, Yaw=$yaw")
+        _imuData.value = ImuData(pitch, roll, yaw)
     }
 
     // ---------------------------------------------------------------------
