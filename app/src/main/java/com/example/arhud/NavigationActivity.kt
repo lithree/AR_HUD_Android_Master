@@ -2,7 +2,9 @@ package com.example.arhud
 
 import android.Manifest
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Bundle
@@ -42,9 +44,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -61,6 +66,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import com.example.arhud.ui.theme.ARHUDTheme
 import com.google.android.gms.common.ConnectionResult
@@ -121,6 +128,23 @@ class NavigationActivity : ComponentActivity() {
         setContent {
             val bleStatus by bleManager.status.collectAsState()
             val debugData by bleManager.hudDebugData.collectAsState()
+            val prefs = remember { getSharedPreferences("ar_hud_config", Context.MODE_PRIVATE) }
+            var displayHudSimulator by remember {
+                mutableStateOf(prefs.getBoolean("key_display_hud_simulator", true))
+            }
+
+            val lifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        displayHudSimulator = prefs.getBoolean("key_display_hud_simulator", true)
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
+                }
+            }
 
             ARHUDTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -133,6 +157,7 @@ class NavigationActivity : ComponentActivity() {
                             navigationView = navigationView,
                             bleStatus = bleStatus,
                             debugData = debugData,
+                            displayHudSimulator = displayHudSimulator,
                             onStartNavigation = { destination ->
                                 startNavigation(destination)
                             },
@@ -714,6 +739,7 @@ fun NavigationContent(
     navigationView: NavigationView,
     bleStatus: String,
     debugData: HudDebugData,
+    displayHudSimulator: Boolean = true,
     onStartNavigation: (String) -> Unit,
     onExitNavigation: () -> Unit
 ) {
@@ -767,13 +793,15 @@ fun NavigationContent(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Floating Real-Time HUD Debug Overlay
-            HudArrowDebugWidget(
-                debugData = debugData,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-            )
+            // Floating Real-Time HUD Debug Overlay / Simulator
+            if (displayHudSimulator) {
+                HudArrowDebugWidget(
+                    debugData = debugData,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                )
+            }
         }
     }
 }

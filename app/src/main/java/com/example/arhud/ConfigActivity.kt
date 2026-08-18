@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -35,12 +36,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +64,7 @@ class ConfigActivity : ComponentActivity() {
         private const val KEY_DEV_MODE_SELECTED = "key_dev_mode_selected"
         private const val KEY_DEV_MODE_1 = "key_dev_mode_1"
         private const val KEY_DEV_MODE_2 = "key_dev_mode_2"
+        private const val KEY_DISPLAY_HUD_SIMULATOR = "key_display_hud_simulator"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +82,7 @@ class ConfigActivity : ComponentActivity() {
                 else -> 3
             }
         )
+        val initialDisplayHudSimulator = prefs.getBoolean(KEY_DISPLAY_HUD_SIMULATOR, true)
 
         enableEdgeToEdge()
         setContent {
@@ -87,6 +92,7 @@ class ConfigActivity : ComponentActivity() {
             ARHUDTheme {
                 ConfigScreen(
                     initialDevMode = initialDevMode,
+                    initialDisplayHudSimulator = initialDisplayHudSimulator,
                     bleStatus = bleStatus,
                     isConnected = isConnected,
                     onDevModeSelected = { mode ->
@@ -95,6 +101,9 @@ class ConfigActivity : ComponentActivity() {
                             .putBoolean(KEY_DEV_MODE_1, mode == 1)
                             .putBoolean(KEY_DEV_MODE_2, mode == 2)
                             .apply()
+                    },
+                    onDisplayHudSimulatorChange = { enabled ->
+                        prefs.edit().putBoolean(KEY_DISPLAY_HUD_SIMULATOR, enabled).apply()
                     },
                     onBackPressed = {
                         finish()
@@ -109,12 +118,15 @@ class ConfigActivity : ComponentActivity() {
 @Composable
 fun ConfigScreen(
     initialDevMode: Int,
+    initialDisplayHudSimulator: Boolean,
     bleStatus: String,
     isConnected: Boolean,
     onDevModeSelected: (Int) -> Unit,
+    onDisplayHudSimulatorChange: (Boolean) -> Unit,
     onBackPressed: () -> Unit
 ) {
     var selectedMode by remember { mutableIntStateOf(initialDevMode) }
+    var displayHudSimulator by remember { mutableStateOf(initialDisplayHudSimulator) }
 
     Scaffold(
         topBar = {
@@ -254,6 +266,56 @@ fun ConfigScreen(
                             onDevModeSelected(3)
                         }
                     )
+                }
+            }
+
+            // HUD Simulator Display Toggle Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                val next = !displayHudSimulator
+                                displayHudSimulator = next
+                                onDisplayHudSimulatorChange(next)
+                            }
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Display HUD simulator",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Show real-time HUD preview widget during navigation",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Switch(
+                            checked = displayHudSimulator,
+                            onCheckedChange = { isChecked ->
+                                displayHudSimulator = isChecked
+                                onDisplayHudSimulatorChange(isChecked)
+                            }
+                        )
+                    }
                 }
             }
 
