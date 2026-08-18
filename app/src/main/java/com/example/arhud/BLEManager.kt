@@ -169,8 +169,6 @@ class BleManager private constructor(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        if (isScanning) return
-
         if (!hasScanPermission()) {
             _status.value = "Missing BLE permission"
             reportError("Missing BLE permission — request it before scanning")
@@ -195,9 +193,23 @@ class BleManager private constructor(private val context: Context) {
             return
         }
 
+        // Cancel previous scan if still active
+        if (isScanning) {
+            try {
+                bleScanner?.stopScan(scanCallback)
+            } catch (ignored: Exception) {}
+            isScanning = false
+        }
+
         val filters = listOf(
             ScanFilter.Builder()
                 .setServiceUuid(android.os.ParcelUuid(SERVICE_UUID))
+                .build(),
+            ScanFilter.Builder()
+                .setDeviceName("ARHUD")
+                .build(),
+            ScanFilter.Builder()
+                .setDeviceName("ESP32_NAV")
                 .build()
         )
         val settings = ScanSettings.Builder()
@@ -209,6 +221,7 @@ class BleManager private constructor(private val context: Context) {
             _status.value = "Scanning..."
             bleScanner?.startScan(filters, settings, scanCallback)
             // Auto-stop scan after timeout to save battery
+            mainHandler.removeCallbacksAndMessages(null)
             mainHandler.postDelayed({ stopScan() }, SCAN_TIMEOUT_MS)
         } catch (e: SecurityException) {
             isScanning = false
@@ -226,17 +239,35 @@ class BleManager private constructor(private val context: Context) {
     fun stopScan() {
         if (!isScanning) return
         isScanning = false
-        bleScanner?.stopScan(scanCallback)
+        try {
+            bleScanner?.stopScan(scanCallback)
+        } catch (ignored: Exception) {}
+        if (!_isConnected.value && _status.value.startsWith("Scanning")) {
+            _status.value = "Disconnected"
+        }
     }
 
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
-            // Optional extra filter by advertised name, in case multiple
-            // devices expose the same service UUID
-            if (device.name == TARGET_DEVICE_NAME) {
-                _status.value = "Device found: ${device.name ?: "Unknown"}. Connecting..."
+            val scanRecord = result.scanRecord
+            val devName = device.name ?: scanRecord?.deviceName
+
+            val matchesName = devName != null && (
+                devName.equals("ARHUD", ignoreCase = true) ||
+                devName.equals("ESP32_NAV", ignoreCase = true) ||
+                devName.contains("HUD", ignoreCase = true) ||
+                devName.contains("ESP32", ignoreCase = true)
+            )
+
+            val matchesService = scanRecord?.serviceUuids?.any {
+                it.uuid == SERVICE_UUID
+            } == true
+
+            if (matchesName || matchesService || devName == TARGET_DEVICE_NAME) {
+                val displayName = devName ?: "ARHUD"
+                _status.value = "Device found: $displayName. Connecting..."
                 callback?.onScanFound(device)
                 stopScan()
                 connect(device)
