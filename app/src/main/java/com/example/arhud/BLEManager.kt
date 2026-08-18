@@ -402,14 +402,16 @@ class BleManager private constructor(private val context: Context) {
     }
 
     /**
-     * Unpacks the 10-bit packed IMU data received from the ESP32.
-     * Expected format: [0xAA][P_MSB][P_LSB/R_MSB][R_LSB/Y_MSB][Y_LSB][0x00][0x00][0x55]
-     * Actually, it's 30 bits packed into 4 bytes (indices 1..4).
+     * Handles incoming BLE notification frames from the ESP32.
+     * Supports:
+     * 1. 8-byte Telemetry Frame: [0xAA][0xBD][Heading_MSB][Heading_LSB][Reserved/Speed][Reserved][Reserved][0x55]
+     *    where nav_heading = (int)yaw * 10
+     * 2. Legacy 30-bit packed IMU Frame: [0xAA][P_MSB][P_LSB/R_MSB][R_LSB/Y_MSB][Y_LSB][0x00][0x00][0x55]
      */
     private fun handleIncomingData(data: ByteArray?) {
         if (data == null || data.size < 8) return
 
-        // Verify start and end frames
+        // Verify start and end frame markers
         val header = data[0].toInt() and 0xFF
         val footer = data[7].toInt() and 0xFF
         if (header != 0xAA || footer != 0x55) {
@@ -417,27 +419,49 @@ class BleManager private constructor(private val context: Context) {
             return
         }
 
-        // Bytes 1, 2, 3, 4 contain the 30 bits
-        val b1 = data[1].toInt() and 0xFF
-        val b2 = data[2].toInt() and 0xFF
-        val b3 = data[3].toInt() and 0xFF
-        val b4 = data[4].toInt() and 0xFF
+        val cmd = data[1].toInt() and 0xFF
 
-        // Reconstruct the 32-bit container (top 2 bits are unused/reserved)
-        val packed30bit = (b1 shl 24) or (b2 shl 16) or (b3 shl 8) or b4
+        if (cmd == 0xBD) {
+            // ESP32 Telemetry Frame (0xBD):
+            // data[2] = Heading MSB
+            // data[3] = Heading LSB (nav_heading in tenths of degree: (int)yaw * 10)
+            // data[4] = Reserved / Speed OBD
+            val headingMsb = data[2].toInt() and 0xFF
+            val headingLsb = data[3].toInt() and 0xFF
+            val navHeading = (headingMsb shl 8) or headingLsb
+            val yaw = navHeading / 10
+            val speedObd = data[4].toInt() and 0xFF
 
-        // Extract 10-bit fields
-        val pitch10bit = (packed30bit shr 20) and 0x3FF
-        val roll10bit = (packed30bit shr 10) and 0x3FF
-        val yaw10bit = packed30bit and 0x3FF
+            Log.i(TAG, "ESP32 Frame 0xBD: NavHeading=$navHeading, Yaw=$yaw°, SpeedOBD=$speedObd")
 
-        // Convert back to signed degrees (offset was +180 for pitch/roll)
-        val pitch = pitch10bit - 180
-        val roll = roll10bit - 180
-        val yaw = yaw10bit // Yaw was 0-1023 mapping for 0-360 range
+            _imuData.value = ImuData(pitch = 0, roll = 0, yaw = yaw)
 
-        Log.i(TAG, "IMU Data: Pitch=$pitch, Roll=$roll, Yaw=$yaw")
-        _imuData.value = ImuData(pitch, roll, yaw)
+            // Update carFacing in debug data
+            val currentDebug = _hudDebugData.value
+            _hudDebugData.value = currentDebug.copy(
+                carFacing = (navHeading / 10f),
+                speedKmH = if (speedObd > 0) speedObd else currentDebug.speedKmH
+            )
+        } else {
+            // Legacy 30-bit packed IMU format
+            val b1 = data[1].toInt() and 0xFF
+            val b2 = data[2].toInt() and 0xFF
+            val b3 = data[3].toInt() and 0xFF
+            val b4 = data[4].toInt() and 0xFF
+
+            val packed30bit = (b1 shl 24) or (b2 shl 16) or (b3 shl 8) or b4
+
+            val pitch10bit = (packed30bit shr 20) and 0x3FF
+            val roll10bit = (packed30bit shr 10) and 0x3FF
+            val yaw10bit = packed30bit and 0x3FF
+
+            val pitch = pitch10bit - 180
+            val roll = roll10bit - 180
+            val yaw = yaw10bit
+
+            Log.i(TAG, "ESP32 Packed IMU: Pitch=$pitch, Roll=$roll, Yaw=$yaw")
+            _imuData.value = ImuData(pitch, roll, yaw)
+        }
     }
 
     // ---------------------------------------------------------------------

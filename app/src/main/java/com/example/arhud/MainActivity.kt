@@ -267,9 +267,9 @@ fun MinimalMetroScreen(
                     )
                 }
 
-                // 4. TILE: IMU Sensors (1 col)
+                // 4. TILE: Heading (1 col)
                 item {
-                    MinimalImuTile(imuData = imuData)
+                    MinimalHeadingTile(imuData = imuData)
                 }
 
                 // 5. TILE: Speedometer (1 col)
@@ -387,7 +387,7 @@ private fun MetroCard(
 }
 
 // -------------------------------------------------------------------------
-// 1. Navigation Hero Tile (Minimal Text)
+// 1. Navigation Hero Tile
 // -------------------------------------------------------------------------
 @Composable
 private fun MinimalNavHeroTile(onClick: () -> Unit) {
@@ -432,7 +432,7 @@ private fun MinimalNavHeroTile(onClick: () -> Unit) {
 }
 
 // -------------------------------------------------------------------------
-// 2. BLE Controller Tile (Minimal Text)
+// 2. BLE Controller Tile
 // -------------------------------------------------------------------------
 @Composable
 private fun MinimalBleTile(
@@ -528,7 +528,7 @@ private fun MinimalBleTile(
 }
 
 // -------------------------------------------------------------------------
-// 3. Display Power & Luminance Slider Tile (Entire Non-Slider Area is Hitbox)
+// 3. Display Power & Luminance Slider Tile
 // -------------------------------------------------------------------------
 @Composable
 private fun MinimalPowerTile(
@@ -600,7 +600,7 @@ private fun MinimalPowerTile(
                 }
             }
 
-            // Luminance Slider (bottom area)
+            // Luminance Slider
             Slider(
                 value = luminance,
                 onValueChange = onLuminanceChange,
@@ -623,10 +623,10 @@ private fun MinimalPowerTile(
 }
 
 // -------------------------------------------------------------------------
-// 4. IMU Sensors Tile (Minimal Text)
+// 4. Heading Tile
 // -------------------------------------------------------------------------
 @Composable
-private fun MinimalImuTile(imuData: ImuData?) {
+private fun MinimalHeadingTile(imuData: ImuData?) {
     MetroCard(
         backgroundColor = MetroColors.TileEmerald,
         modifier = Modifier
@@ -640,46 +640,27 @@ private fun MinimalImuTile(imuData: ImuData?) {
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "IMU",
+                text = "HEADING",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp,
                 color = Color.White.copy(alpha = 0.85f)
             )
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                ImuAxisValue("P", imuData?.pitch?.let { "$it°" } ?: "--")
-                ImuAxisValue("R", imuData?.roll?.let { "$it°" } ?: "--")
-                ImuAxisValue("Y", imuData?.yaw?.let { "$it°" } ?: "--")
-            }
+            Text(
+                text = imuData?.yaw?.let { "$it°" } ?: "--°",
+                fontSize = 36.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
 
             Text(
                 text = "Degrees",
-                fontSize = 10.sp,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
                 color = Color.White.copy(alpha = 0.75f)
             )
         }
-    }
-}
-
-@Composable
-private fun ImuAxisValue(axis: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = axis,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White.copy(alpha = 0.7f)
-        )
-        Text(
-            text = value,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White
-        )
     }
 }
 
@@ -708,25 +689,16 @@ private fun MinimalSpeedTile(speedKmH: Int) {
                 color = Color.White.copy(alpha = 0.85f)
             )
 
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    text = "$speedKmH",
-                    fontSize = 36.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "km/h",
-                    fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.8f),
-                    modifier = Modifier.padding(bottom = 6.dp)
-                )
-            }
+            Text(
+                text = "$speedKmH",
+                fontSize = 36.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
 
             Text(
-                text = "GPS",
-                fontSize = 10.sp,
+                text = "km/h",
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White.copy(alpha = 0.75f)
             )
