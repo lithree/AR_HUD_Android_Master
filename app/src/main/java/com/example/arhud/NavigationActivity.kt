@@ -1,13 +1,19 @@
 package com.example.arhud
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.location.Address
+import android.location.Geocoder
 import android.location.Location
+import android.os.Build
 import android.os.Bundle
+import java.util.Locale
+import kotlinx.coroutines.CompletableDeferred
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -132,12 +138,16 @@ class NavigationActivity : ComponentActivity() {
             var displayHudSimulator by remember {
                 mutableStateOf(prefs.getBoolean("key_display_hud_simulator", true))
             }
+            var devMode by remember {
+                mutableStateOf(prefs.getInt("key_dev_mode_selected", 3))
+            }
 
             val lifecycleOwner = LocalLifecycleOwner.current
             DisposableEffect(lifecycleOwner) {
                 val observer = LifecycleEventObserver { _, event ->
                     if (event == Lifecycle.Event.ON_RESUME) {
                         displayHudSimulator = prefs.getBoolean("key_display_hud_simulator", true)
+                        devMode = prefs.getInt("key_dev_mode_selected", 3)
                     }
                 }
                 lifecycleOwner.lifecycle.addObserver(observer)
@@ -158,6 +168,7 @@ class NavigationActivity : ComponentActivity() {
                             bleStatus = bleStatus,
                             debugData = debugData,
                             displayHudSimulator = displayHudSimulator,
+                            devMode = devMode,
                             onStartNavigation = { destination ->
                                 startNavigation(destination)
                             },
@@ -213,7 +224,11 @@ class NavigationActivity : ComponentActivity() {
             return
         }
 
+        val prefs = getSharedPreferences("ar_hud_config", Context.MODE_PRIVATE)
+        val devMode = prefs.getInt("key_dev_mode_selected", 3)
+
         NavigationApi.getNavigator(this, object : NavigationApi.NavigatorListener {
+            @SuppressLint("MissingPermission")
             override fun onNavigatorReady(newNavigator: Navigator) {
                 navigator = newNavigator
                 newNavigator.setAudioGuidance(Navigator.AudioGuidance.SILENT)
@@ -229,14 +244,28 @@ class NavigationActivity : ComponentActivity() {
                     options
                 )
 
-                try {
-                    val simulatedOrigin = LatLng(-33.9399, 151.1753)
-                    newNavigator.simulator.setUserLocation(simulatedOrigin)
-                    navigationView.getMapAsync { googleMap ->
-                        googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(simulatedOrigin, 15f))
+                navigationView.getMapAsync { googleMap ->
+                    if (ContextCompat.checkSelfPermission(this@NavigationActivity, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        googleMap.isMyLocationEnabled = true
                     }
-                } catch (e: Exception) {
-                    Log.e("NavDebug", "Failed to inject simulated origin location", e)
+                }
+
+                if (devMode == 1 || devMode == 2) {
+                    // Mode 1 & 2: Set simulated origin
+                    try {
+                        val simulatedOrigin = LatLng(-33.9399, 151.1753)
+                        newNavigator.simulator.setUserLocation(simulatedOrigin)
+                        navigationView.getMapAsync { googleMap ->
+                            googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(simulatedOrigin, 15f))
+                        }
+                    } catch (e: Exception) {
+                        Log.e("NavDebug", "Failed to inject simulated origin location", e)
+                    }
+                } else {
+                    // Mode 3: Normal mode - Use real GPS location
+                    try {
+                        newNavigator.simulator.unsetUserLocation()
+                    } catch (ignored: Exception) {}
                 }
                 Toast.makeText(this@NavigationActivity, "Navigator Ready", Toast.LENGTH_SHORT).show()
             }
@@ -248,26 +277,138 @@ class NavigationActivity : ComponentActivity() {
     }
 
     private fun startNavigation(destinationQuery: String) {
-        val currentNavigator = navigator ?: return
-
-        val waypoint = if (destinationQuery.lowercase() == "sydney") {
-            Waypoint.builder().setLatLng(-33.8688, 151.2093).setTitle("Sydney").build()
-        } else {
-            Waypoint.builder().setLatLng(-33.8731, 151.2063).setTitle(destinationQuery).build()
+        val currentNavigator = navigator ?: run {
+            Toast.makeText(this, "Navigator not initialized", Toast.LENGTH_SHORT).show()
+            return
         }
 
-        try {
-            val pendingRoute = currentNavigator.setDestination(waypoint)
-            pendingRoute.setOnResultListener { result ->
-                if (result == Navigator.RouteStatus.OK) {
-                    currentNavigator.startGuidance()
-                    currentNavigator.simulator.simulateLocationsAlongExistingRoute(SimulationOptions().speedMultiplier(0.8f))
+        val prefs = getSharedPreferences("ar_hud_config", Context.MODE_PRIVATE)
+        val devMode = prefs.getInt("key_dev_mode_selected", 3)
+
+        if (devMode == 1) {
+            // Mode 1: Simulated Navigation (Fixed Origin & Fixed Destination)
+            val fixedOrigin = LatLng(-33.9399, 151.1753)
+            val fixedDestination = LatLng(-33.8731, 151.2063)
+
+            try {
+                currentNavigator.simulator.setUserLocation(fixedOrigin)
+            } catch (e: Exception) {
+                Log.e("NavDebug", "Failed to set fixed simulated origin", e)
+            }
+
+            val waypoint = Waypoint.builder()
+                .setLatLng(fixedDestination.latitude, fixedDestination.longitude)
+                .setTitle("Sydney (Fixed Simulation)")
+                .build()
+
+            try {
+                val pendingRoute = currentNavigator.setDestination(waypoint)
+                pendingRoute.setOnResultListener { result ->
+                    if (result == Navigator.RouteStatus.OK) {
+                        currentNavigator.startGuidance()
+                        currentNavigator.simulator.simulateLocationsAlongExistingRoute(
+                            SimulationOptions().speedMultiplier(0.8f)
+                        )
+                        Toast.makeText(this, "Simulated Navigation Started", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Failed to start simulation route: $result", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("NavDebug", "Simulated setDestination threw exception", e)
+                Toast.makeText(this, "Simulation error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        // Mode 2 & Mode 3: Destination allocated by user
+        if (destinationQuery.isBlank()) {
+            Toast.makeText(this, "Please enter a destination", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        resolveDestination(destinationQuery) { targetLatLng, title ->
+            if (targetLatLng == null) {
+                Toast.makeText(this, "Could not find location: '$destinationQuery'", Toast.LENGTH_SHORT).show()
+                return@resolveDestination
+            }
+
+            val waypoint = Waypoint.builder()
+                .setLatLng(targetLatLng.latitude, targetLatLng.longitude)
+                .setTitle(title.ifBlank { destinationQuery })
+                .build()
+
+            try {
+                val pendingRoute = currentNavigator.setDestination(waypoint)
+                pendingRoute.setOnResultListener { result ->
+                    if (result == Navigator.RouteStatus.OK) {
+                        currentNavigator.startGuidance()
+                        try {
+                            currentNavigator.simulator.pause()
+                            if (devMode == 3) {
+                                currentNavigator.simulator.unsetUserLocation()
+                            }
+                        } catch (ignored: Exception) {}
+                        Toast.makeText(this, "Navigating to: $title", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Failed to calculate route: $result", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("NavDebug", "setDestination threw exception", e)
+                Toast.makeText(this, "Navigation error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun resolveDestination(query: String, onResolved: (LatLng?, String) -> Unit) {
+        val trimmed = query.trim()
+
+        // 1. Direct Lat/Lng coordinate parsing: "-33.8688, 151.2093"
+        val latLngMatch = Regex("""^(-?\d+(\.\d+)?),\s*(-?\d+(\.\d+)?)$""").find(trimmed)
+        if (latLngMatch != null) {
+            val lat = latLngMatch.groupValues[1].toDoubleOrNull()
+            val lng = latLngMatch.groupValues[3].toDoubleOrNull()
+            if (lat != null && lng != null) {
+                onResolved(LatLng(lat, lng), "Destination ($trimmed)")
+                return
+            }
+        }
+
+        // 2. Android Geocoder lookup for text query
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val geocoder = Geocoder(this@NavigationActivity, Locale.getDefault())
+                val addresses = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val deferred = CompletableDeferred<List<Address>?>()
+                    geocoder.getFromLocationName(trimmed, 1) { list -> deferred.complete(list) }
+                    deferred.await()
                 } else {
-                    Toast.makeText(this, "Failed to set destination: $result", Toast.LENGTH_SHORT).show()
+                    @Suppress("DEPRECATION")
+                    geocoder.getFromLocationName(trimmed, 1)
+                }
+
+                withContext(Dispatchers.Main) {
+                    if (!addresses.isNullOrEmpty()) {
+                        val addr = addresses[0]
+                        val displayName = addr.getAddressLine(0) ?: addr.featureName ?: trimmed
+                        onResolved(LatLng(addr.latitude, addr.longitude), displayName)
+                    } else if (trimmed.equals("sydney", ignoreCase = true)) {
+                        onResolved(LatLng(-33.8688, 151.2093), "Sydney")
+                    } else {
+                        onResolved(null, trimmed)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("NavDebug", "Geocoding error for '$trimmed'", e)
+                withContext(Dispatchers.Main) {
+                    if (trimmed.equals("sydney", ignoreCase = true)) {
+                        onResolved(LatLng(-33.8688, 151.2093), "Sydney")
+                    } else {
+                        onResolved(null, trimmed)
+                    }
                 }
             }
-        } catch (e: Exception) {
-            Log.e("NavDebug", "setDestination threw exception", e)
         }
     }
 
@@ -436,17 +577,11 @@ class NavUpdateService : Service() {
                 nav.setSpeedAlertOptions(speedAlertOptions)
 
                 // Derive the speed limit from (current speed, percentage above limit).
-                // Only sample when speedingPercentage > 0 — a value of exactly 0 is
-                // ambiguous (SDK reports 0 both "at the limit" AND "comfortably under
-                // it"), and using it would overwrite a good limit with the wrong number
-                // whenever the driver eases off the accelerator.
                 nav.setSpeedingListener { speedingPercentage, _ ->
                     val speedKmH = lastKnownSpeedMps * 3.6f
 
                     if (speedingPercentage > 0 && speedKmH > 0) {
                         val rawLimit = speedKmH / (1f + speedingPercentage / 100f)
-                        // Real-world limits are always round numbers (40/50/60/70/80/100/110).
-                        // Snapping absorbs GPS noise and SDK-internal smoothing error.
                         val roundedLimit = (Math.round(rawLimit / 5f) * 5)
 
                         Log.d(
@@ -524,10 +659,29 @@ class NavUpdateService : Service() {
             }
         }
 
+        val prefs = getSharedPreferences("ar_hud_config", Context.MODE_PRIVATE)
+        val devMode = prefs.getInt("key_dev_mode_selected", 3)
+
+        // 1. Heading source:
+        // In Normal Mode (Mode 3), prioritize real device IMU yaw (from ESP32 BLE).
+        // In Simulated Modes (Mode 1 & 2), strictly follow simulated map camera facing without IMU influence.
+        val effectiveCarFacingCcw = if (devMode == 3) {
+            val imuYaw = bleManager.imuData.value?.yaw
+            if (imuYaw != null) {
+                var ccw = (360f - imuYaw) % 360f
+                if (ccw < 0) ccw += 360f
+                ccw
+            } else {
+                lastKnownCarFacingCcw
+            }
+        } else {
+            lastKnownCarFacingCcw
+        }
+
         if (NAV_distanceMeters <= 25 && nextTurnAngle < 65535f) {
-            // Combine next turn angle with simulated car facing (both in CCW frame)
+            // Combine next turn angle with simulated/real car facing (both in CCW frame)
             // Relative arrow angle = (nextTurnAngle - carFacingCcw) mod 360
-            var relativeArrowBearing = (nextTurnAngle - lastKnownCarFacingCcw) % 360f
+            var relativeArrowBearing = (nextTurnAngle - effectiveCarFacingCcw) % 360f
             if (relativeArrowBearing < 0) relativeArrowBearing += 360f
             NAV_heading = relativeArrowBearing
         } else {
@@ -535,10 +689,10 @@ class NavUpdateService : Service() {
             NAV_heading = 65535f
         }
 
-        // 1. Vehicle speed from SDK RoadSnappedLocationProvider (km/h)
+        // 2. Vehicle speed from SDK RoadSnappedLocationProvider (km/h)
         val navSpeedKmH = currentSpeedKmH
 
-        // 2. Road speed limit derived from speeding listener (km/h)
+        // 3. Road speed limit derived from speeding listener (km/h)
         val navSpeedLimitKmH = currentSpeedLimitKmH
 
         val rawManeuver = navInfo.currentStep?.maneuver ?: 0
@@ -553,7 +707,7 @@ class NavUpdateService : Service() {
         bleManager.updateHudDebugData(
             arrowBearing = NAV_heading,
             nextTurnAngle = nextTurnAngle,
-            carFacing = lastKnownCarFacingCcw,
+            carFacing = effectiveCarFacingCcw,
             distanceMeters = NAV_distanceMeters,
             speedKmH = navSpeedKmH,
             speedLimitKmH = navSpeedLimitKmH,
@@ -562,14 +716,14 @@ class NavUpdateService : Service() {
 
         val arrowHeadingLog = if (NAV_heading >= 65535f) "65535 (Out of bounds)" else "%.1f°".format(NAV_heading)
         val nextTurnLog = if (nextTurnAngle >= 65535f) "N/A" else "%.1f°".format(nextTurnAngle)
-        val carFacingLog = "%.1f°".format(lastKnownCarFacingCcw)
+        val carFacingLog = "%.1f°".format(effectiveCarFacingCcw)
         val signNameLog = ManeuverMapper.getDeviceIconName(deviceSignIndex)
 
         Log.d("HUD_DEBUG", """
             [HUD Data Sent @ 5Hz] 
             ├── Arrow Bearing (Sent to HUD) : $arrowHeadingLog
             ├── Next Turn Angle (World CCW) : $nextTurnLog
-            ├── Car Facing (Simulated CCW)  : $carFacingLog
+            ├── Car Facing (Active CCW)     : $carFacingLog
             ├── Distance to Turn            : ${NAV_distanceMeters} m
             ├── Speed                       : ${navSpeedKmH} km/h (Limit: ${navSpeedLimitKmH} km/h)
             ├── Sign Index (Device Mapped)  : $deviceSignIndex ($signNameLog) [Raw Google: $rawManeuver]
@@ -740,6 +894,7 @@ fun NavigationContent(
     bleStatus: String,
     debugData: HudDebugData,
     displayHudSimulator: Boolean = true,
+    devMode: Int = 3,
     onStartNavigation: (String) -> Unit,
     onExitNavigation: () -> Unit
 ) {

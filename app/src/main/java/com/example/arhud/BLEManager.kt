@@ -436,12 +436,10 @@ class BleManager private constructor(private val context: Context) {
 
             _imuData.value = ImuData(pitch = 0, roll = 0, yaw = yaw)
 
-            // Update carFacing in debug data
-            val currentDebug = _hudDebugData.value
-            _hudDebugData.value = currentDebug.copy(
-                carFacing = (navHeading / 10f),
-                speedKmH = if (speedObd > 0) speedObd else currentDebug.speedKmH
-            )
+            if (speedObd > 0) {
+                val currentDebug = _hudDebugData.value
+                _hudDebugData.value = currentDebug.copy(speedKmH = speedObd)
+            }
         } else {
             // Legacy 30-bit packed IMU format
             val b1 = data[1].toInt() and 0xFF
