@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -64,6 +65,9 @@ class MainActivity : ComponentActivity() {
                     },
                     onOpenNavigation = {
                         startActivity(Intent(this, NavigationActivity::class.java))
+                    },
+                    onOpenConfig = {
+                        startActivity(Intent(this, ConfigActivity::class.java))
                     }
                 )
             }
@@ -124,7 +128,8 @@ enum class AppDestinations(
     val icon: ImageVector
 ) {
     BLE_STATUS("BLE Status", Icons.Default.Home),
-    NAVIGATION("Navigation", Icons.Default.LocationOn)
+    NAVIGATION("Navigation", Icons.Default.LocationOn),
+    CONFIG("Config", Icons.Default.Settings)
 }
 
 @Composable
@@ -132,7 +137,8 @@ fun ARHUDMainScreen(
     bleStatus: String,
     onRetryScan: () -> Unit,
     onDisconnect: () -> Unit,
-    onOpenNavigation: () -> Unit
+    onOpenNavigation: () -> Unit,
+    onOpenConfig: () -> Unit
 ) {
     var currentDestination by remember { mutableStateOf(AppDestinations.BLE_STATUS) }
 
@@ -149,10 +155,10 @@ fun ARHUDMainScreen(
                     label = { Text(destination.label) },
                     selected = destination == currentDestination,
                     onClick = { 
-                        if (destination == AppDestinations.NAVIGATION) {
-                            onOpenNavigation()
-                        } else {
-                            currentDestination = destination
+                        when (destination) {
+                            AppDestinations.NAVIGATION -> onOpenNavigation()
+                            AppDestinations.CONFIG -> onOpenConfig()
+                            AppDestinations.BLE_STATUS -> currentDestination = destination
                         }
                     }
                 )
@@ -169,7 +175,8 @@ fun ARHUDMainScreen(
                     BleTabScreen(
                         status = bleStatus,
                         onRetryScan = onRetryScan,
-                        onDisconnect = onDisconnect
+                        onDisconnect = onDisconnect,
+                        onOpenConfig = onOpenConfig
                     )
                 }
             }
@@ -181,7 +188,8 @@ fun ARHUDMainScreen(
 fun BleTabScreen(
     status: String,
     onRetryScan: () -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onOpenConfig: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -204,6 +212,14 @@ fun BleTabScreen(
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
         ) {
             Text("Disconnect")
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Button(
+            onClick = onOpenConfig,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+        ) {
+            Text("Open Configuration")
         }
     }
 }

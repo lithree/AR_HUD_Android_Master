@@ -50,11 +50,11 @@ class BleManager private constructor(private val context: Context) {
         val SERVICE_UUID: UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
         val CHARACTERISTIC_UUID: UUID = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
 
-        // Standard CCCD UUID, needed if we ever enable notifications from ESP32
+        // Standard CCCD UUID
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         // Filter devices by advertised local name (set on the ESP32 side)
-        private const val TARGET_DEVICE_NAME = "ESP32_NAV"
+        private const val TARGET_DEVICE_NAME = "ARHUD"
 
         private const val SCAN_TIMEOUT_MS = 10_000L
     }
@@ -376,86 +376,64 @@ class BleManager private constructor(private val context: Context) {
     // ---------------------------------------------------------------------
     // Data packing & sending
     // ---------------------------------------------------------------------
-
     /**
-     * Sends a fixed, minimal test frame purely to verify the BLE write path
-     * works end-to-end (phone -> GATT -> ESP32). No navigation logic involved.
-     * Frame: [0xAA header][0x00 test command][0x01 payload byte][checksum]
+     * Upload data to device using the 11-byte frame structure:
+     * ID1(1B) + Speed_APP(1B) + ArrowAngle(2B) + SignIdx(1B) + SignDist(2B) + SpeedLimit_APP(1B) + LineData(3B)
      */
-    fun sendTestPacket() {
-        val payload = byteArrayOf(
-            0xAA.toByte(), // header
-            0x00,          // command type: test / ping
-            0x01           // arbitrary test payload byte
-        )
-        val checksum = computeChecksum(payload, startIndex = 1)
-        val frame = payload + checksum
-        enqueueWrite(frame)
-    }
-
-    /**
-     * Pack turn/lane navigation data into a compact binary frame and send it
-     * over BLE.
-     *
-     * Example frame layout (customize to match ESP32 firmware's parser):
-     * [0]      : Header byte, fixed 0xAA for frame sync
-     * [1]      : Command / packet type (e.g. 0x01 = navigation update)
-     * [2]      : Turn direction code (0=straight, 1=left, 2=right, 3=U-turn)
-     * [3]      : Lane index (0-based, which lane to take)
-     * [4]      : Total lane count at this segment
-     * [5-6]    : Distance to the turn in meters, big-endian UInt16
-     * [7]      : Checksum (simple XOR of bytes 1..6)
-     */
-    fun sendTurnAndLaneData(
-        turnDirection: Int,
-        laneIndex: Int,
-        totalLanes: Int,
-        distanceToTurnMeters: Int
+    fun sendDeviceDataFlow(
+        id1: Int = 0x01,
+        speedApp: Int = 0,
+        arrowAngle: Int = 0,
+        signIdx: Int = 0,
+        signDist: Int = 0,
+        speedLimitApp: Int = 0,
+        lineData: ByteArray = ByteArray(3)
     ) {
-        val distance = distanceToTurnMeters.coerceIn(0, 0xFFFF)
-
-        val payload = byteArrayOf(
-            0xAA.toByte(),                       // header
-            0x01,                                // command type: nav update
-            turnDirection.toByte(),
-            laneIndex.toByte(),
-            totalLanes.toByte(),
-            ((distance shr 8) and 0xFF).toByte(), // distance high byte
-            (distance and 0xFF).toByte()          // distance low byte
+        val angle = arrowAngle.coerceIn(0, 3600)
+        val dist = signDist.coerceIn(0, 0xFFFF)
+        val lines = ByteArray(3)
+        if (lineData.isNotEmpty()) {
+            val copyLen = minOf(3, lineData.size)
+            System.arraycopy(lineData, 0, lines, 0, copyLen)
+        }
+        val frame = byteArrayOf(
+            (id1 and 0xFF).toByte(),
+            (speedApp.coerceIn(0, 255)).toByte(),
+            ((angle shr 8) and 0xFF).toByte(),
+            (angle and 0xFF).toByte(),
+            (signIdx.coerceIn(0, 255)).toByte(),
+            ((dist shr 8) and 0xFF).toByte(),
+            (dist and 0xFF).toByte(),
+            (speedLimitApp.coerceIn(0, 255)).toByte(),
+            lines[0],
+            lines[1],
+            lines[2]
         )
-
-        val checksum = computeChecksum(payload, startIndex = 1)
-        val frame = payload + checksum
 
         enqueueWrite(frame)
     }
 
     /**
-     * Sends heading (angle) and distance to the current maneuver using the 
-     * firmware-compatible 8-byte Command 0x01 structure.
-     * 
-     * Heading (0-3600) is split across turnDirection and laneIndex fields.
-     * Distance is sent as a 16-bit value in the distanceToTurn field.
+     * Helper method for navigation updates using the 11-byte upload to device mechanism.
      */
-    fun sendNavigationData(heading: Float, distanceMeters: Int) {
+    fun sendNavigationData(
+        heading: Float,
+        distanceMeters: Int,
+        speedKmH: Int = 0,
+        signIndex: Int = 0,
+        speedLimitKmH: Int = 0,
+        laneData: ByteArray = ByteArray(3)
+    ) {
         val scaledHeading = (heading * 10).toInt().coerceIn(0, 3600)
-        val distance = distanceMeters.coerceIn(0, 0xFFFF)
-
-        // Packet format: [0xAA][0x01][H_MSB][H_LSB][0x00][D_MSB][D_LSB][CRC]
-        val payload = byteArrayOf(
-            0xAA.toByte(),
-            0x01, // Command 0x01 as expected by firmware
-            ((scaledHeading shr 8) and 0xFF).toByte(), // H_MSB -> turn_direction
-            (scaledHeading and 0xFF).toByte(),        // H_LSB -> lane_index
-            0x00,                                      // placeholder -> total_lanes
-            ((distance shr 8) and 0xFF).toByte(),      // D_MSB -> distance_to_turn
-            (distance and 0xFF).toByte()               // D_LSB -> distance_to_turn
+        sendDeviceDataFlow(
+            id1 = 0x01,
+            speedApp = speedKmH,
+            arrowAngle = scaledHeading,
+            signIdx = signIndex,
+            signDist = distanceMeters,
+            speedLimitApp = speedLimitKmH,
+            lineData = laneData
         )
-
-        val checksum = computeChecksum(payload, startIndex = 1)
-        val frame = payload + checksum
-
-        enqueueWrite(frame)
     }
 
     private fun computeChecksum(data: ByteArray, startIndex: Int): Byte {

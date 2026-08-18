@@ -52,7 +52,11 @@ import com.google.android.libraries.navigation.NavigationApi
 import com.google.android.libraries.navigation.NavigationUpdatesOptions
 import com.google.android.libraries.navigation.Navigator
 import com.google.android.libraries.navigation.NavigationView
+import com.google.android.libraries.navigation.RoadSnappedLocationProvider
 import com.google.android.libraries.navigation.SimulationOptions
+import com.google.android.libraries.navigation.SpeedAlertOptions
+import com.google.android.libraries.navigation.SpeedAlertSeverity
+import com.google.android.libraries.navigation.SpeedometerUiOptions
 import com.google.android.libraries.navigation.Waypoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -75,6 +79,10 @@ class NavigationActivity : ComponentActivity() {
         // Initialize Navigation View
         navigationView = layoutInflater.inflate(R.layout.navigation_view_layout, null) as NavigationView
         navigationView.onCreate(savedInstanceState)
+        
+        // Enable speedometer and speed limit display to ensure the SDK tracks this data
+        navigationView.setSpeedometerEnabled(true)
+        navigationView.setSpeedLimitIconEnabled(true)
 
         checkAndRequestPermissions()
         runDirectApiDiagnosis()
@@ -196,7 +204,7 @@ class NavigationActivity : ComponentActivity() {
             pendingRoute.setOnResultListener { result ->
                 if (result == Navigator.RouteStatus.OK) {
                     currentNavigator.startGuidance()
-                    currentNavigator.simulator.simulateLocationsAlongExistingRoute(SimulationOptions().speedMultiplier(0.5f))
+                    currentNavigator.simulator.simulateLocationsAlongExistingRoute(SimulationOptions().speedMultiplier(2.5f))
                 } else {
                     Toast.makeText(this, "Failed to set destination: $result", Toast.LENGTH_SHORT).show()
                 }
@@ -291,17 +299,42 @@ class NavigationActivity : ComponentActivity() {
 /**
  * Service to receive turn-by-turn navigation updates from the Google Maps Navigation SDK.
  */
+/**
+ * Service to receive turn-by-turn navigation updates from the Google Maps Navigation SDK.
+ */
 class NavUpdateService : Service() {
     private var navigator: Navigator? = null
     private lateinit var bleManager: BleManager
+
+    // Raw, unrounded values — source of truth for math
+    private var lastKnownSpeedMps: Float = 0f
+    private var currentSpeedLimitKmH: Int = 0
+
+    // Rounded, display/BLE-facing value derived from lastKnownSpeedMps
+    private val currentSpeedKmH: Int
+        get() = (lastKnownSpeedMps * 3.6f).toInt()
+
+    private var latestNavInfo: com.google.android.libraries.mapsplatform.turnbyturn.model.NavInfo? = null
+
+    private val sendHandler = Handler(Looper.getMainLooper())
+    private val sendRunnable = object : Runnable {
+        override fun run() {
+            sendCurrentNavData()
+            sendHandler.postDelayed(this, SEND_INTERVAL_MS)
+        }
+    }
 
     private val mMessenger = Messenger(Handler(Looper.getMainLooper()) { msg ->
         if (msg.what == TurnByTurnManager.MSG_NAV_INFO) {
             val bundle = msg.data
             bundle.classLoader = TurnByTurnManager::class.java.classLoader
+
+            // DIAGNOSTIC: Log all keys in Turn-by-Turn bundle
+            Log.d("HUD_DEBUG", "NavInfo Bundle Keys: ${bundle.keySet().joinToString(", ")}")
+
             val navInfo = TurnByTurnManager.createInstance().readNavInfoFromBundle(bundle)
             if (navInfo != null) {
-                handleNavInfo(navInfo)
+                latestNavInfo = navInfo
             }
         }
         true
@@ -310,33 +343,82 @@ class NavUpdateService : Service() {
     override fun onCreate() {
         super.onCreate()
         bleManager = BleManager.getInstance(this)
+        val app = this.application as android.app.Application
 
-        NavigationApi.getNavigator(this.application as android.app.Application, object : NavigationApi.NavigatorListener {
+        // Start 2Hz periodic BLE transmission
+        sendHandler.post(sendRunnable)
+
+        // Use RoadSnappedLocationProvider for accurate vehicle speed (snapped to road)
+        NavigationApi.getRoadSnappedLocationProvider(app)?.addLocationListener(object : RoadSnappedLocationProvider.LocationListener {
+            override fun onLocationChanged(location: android.location.Location) {
+                // Keep the raw float — do NOT truncate here, truncation happens only
+                // at the point of display/BLE transmission via currentSpeedKmH getter.
+                lastKnownSpeedMps = location.speed
+            }
+        })
+
+        NavigationApi.getNavigator(app, object : NavigationApi.NavigatorListener {
             override fun onNavigatorReady(nav: Navigator) {
                 navigator = nav
+
+                // Configure speed alerts to trigger as much as possible
+                val speedAlertOptions = SpeedAlertOptions.Builder()
+                    .setSpeedAlertThresholdPercentage(SpeedAlertSeverity.MINOR, 0f)
+                    .setSpeedAlertThresholdPercentage(SpeedAlertSeverity.MAJOR, 5f)
+                    .setSeverityUpgradeDurationSeconds(5.0)
+                    .build()
+                nav.setSpeedAlertOptions(speedAlertOptions)
+
+                // Derive the speed limit from (current speed, percentage above limit).
+                // Only sample when speedingPercentage > 0 — a value of exactly 0 is
+                // ambiguous (SDK reports 0 both "at the limit" AND "comfortably under
+                // it"), and using it would overwrite a good limit with the wrong number
+                // whenever the driver eases off the accelerator.
+                nav.setSpeedingListener { speedingPercentage, _ ->
+                    val speedKmH = lastKnownSpeedMps * 3.6f
+
+                    if (speedingPercentage > 0 && speedKmH > 0) {
+                        val rawLimit = speedKmH / (1f + speedingPercentage / 100f)
+                        // Real-world limits are always round numbers (40/50/60/70/80/100/110).
+                        // Snapping absorbs GPS noise and SDK-internal smoothing error.
+                        val roundedLimit = (Math.round(rawLimit / 5f) * 5)
+
+                        Log.d(
+                            "SPEEDLIMIT_DEBUG",
+                            "pct=$speedingPercentage speedKmH=$speedKmH rawLimit=$rawLimit roundedLimit=$roundedLimit (prevLimit=$currentSpeedLimitKmH)"
+                        )
+
+                        if (roundedLimit > 0) {
+                            currentSpeedLimitKmH = roundedLimit
+                        }
+                    }
+                }
             }
             override fun onError(p0: Int) {}
         })
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        sendHandler.removeCallbacks(sendRunnable)
     }
 
     override fun onBind(intent: Intent): IBinder? {
         return mMessenger.binder
     }
 
-    private fun handleNavInfo(navInfo: com.google.android.libraries.mapsplatform.turnbyturn.model.NavInfo) {
-        val distanceMeters = navInfo.distanceToCurrentStepMeters ?: 0
-        var targetHeading = 0f
+    private fun sendCurrentNavData() {
+        val navInfo = latestNavInfo ?: return
 
+        val NAV_distanceMeters = navInfo.distanceToCurrentStepMeters ?: 0
+        var NAV_heading = 0f
         val currentSegment = navigator?.currentRouteSegment
 
         if (currentSegment != null) {
-            // latLngs from routeSegment are valid geometry coordinates
             val latLngs = currentSegment.latLngs
 
             if (latLngs != null && latLngs.size >= 2) {
-                if (distanceMeters > 100) {
-                    // Logic 1: Distance > 100m. Output the CURRENT road's heading.
-                    // Calculate heading from current car position (latLngs[0]) looking ahead 25 meters.
+                if (NAV_distanceMeters > 100) {
                     val startP = latLngs[0]
                     var endP = latLngs[1]
                     var lookAheadDist = 0f
@@ -345,29 +427,24 @@ class NavUpdateService : Service() {
                         endP = latLngs[j + 1]
                         if (lookAheadDist >= 25f) break
                     }
-                    targetHeading = calculateBearing(startP, endP)
+                    NAV_heading = calculateBearing(startP, endP)
 
                 } else {
-                    // Logic 2: Distance <= 100m. Output the NEXT road's heading.
                     var accumulatedDistance = 0f
                     var turnIndex = -1
 
-                    // Find the physical turning point by walking along the route geometry
                     for (i in 0 until latLngs.size - 1) {
                         val p1 = latLngs[i]
                         val p2 = latLngs[i + 1]
                         accumulatedDistance += calculateDistance(p1, p2)
 
-                        // 15m tolerance for GPS drift / intersection width
-                        if (accumulatedDistance >= (distanceMeters - 15f)) {
+                        if (accumulatedDistance >= (NAV_distanceMeters - 15f)) {
                             turnIndex = i + 1
                             break
                         }
                     }
 
                     if (turnIndex != -1 && turnIndex < latLngs.size - 1) {
-                        // Successfully located the turn intersection.
-                        // Look ahead 25m into the NEW road to establish the next heading.
                         val startP = latLngs[turnIndex]
                         var endP = latLngs[turnIndex + 1]
                         var lookAheadDist = 0f
@@ -377,10 +454,8 @@ class NavUpdateService : Service() {
                             endP = latLngs[j + 1]
                             if (lookAheadDist >= 25f) break
                         }
-                        targetHeading = calculateBearing(startP, endP)
+                        NAV_heading = calculateBearing(startP, endP)
                     } else {
-                        // Fallback: If we couldn't find the turn (e.g. nearing final destination)
-                        // just maintain current heading.
                         val startP = latLngs[0]
                         var endP = latLngs[1]
                         var lookAheadDist = 0f
@@ -389,14 +464,39 @@ class NavUpdateService : Service() {
                             endP = latLngs[j + 1]
                             if (lookAheadDist >= 25f) break
                         }
-                        targetHeading = calculateBearing(startP, endP)
+                        NAV_heading = calculateBearing(startP, endP)
                     }
                 }
             }
         }
 
-        bleManager.sendNavigationData(targetHeading, distanceMeters)
-        Log.d("HUD_DEBUG", "Sent to HUD: Heading $targetHeading, Distance $distanceMeters")
+        // 1. Vehicle speed from SDK RoadSnappedLocationProvider (km/h)
+        val navSpeedKmH = currentSpeedKmH
+
+        // 2. Road speed limit derived from speeding listener (km/h)
+        val navSpeedLimitKmH = currentSpeedLimitKmH
+
+        val navSignIndex = navInfo.currentStep?.maneuver ?: 0
+        val navLaneData = ByteArray(3) // Lane data placeholder
+
+        val laneByte0 = "0x%02X".format(navLaneData[0])
+        val laneByte1 = "0x%02X".format(navLaneData[1])
+        val laneByte2 = "0x%02X".format(navLaneData[2])
+
+        bleManager.sendNavigationData(NAV_heading, NAV_distanceMeters, navSpeedKmH, navSignIndex, navSpeedLimitKmH, navLaneData)
+        Log.d("HUD_DEBUG", """
+            [HUD Data Sent @ 2Hz] 
+            ├── Heading    : ${NAV_heading}°
+            ├── Distance   : ${NAV_distanceMeters} m
+            ├── Speed      : ${navSpeedKmH} km/h (Limit: ${navSpeedLimitKmH} km/h)
+            ├── Sign Index : ${navSignIndex}
+            └── Lane Data  : [$laneByte0, $laneByte1, $laneByte2]
+            """.trimIndent())
+    }
+
+    companion object {
+        private const val SEND_FREQ_HZ = 2
+        private const val SEND_INTERVAL_MS = 1000L / SEND_FREQ_HZ // 500ms
     }
 
     private fun calculateDistance(start: LatLng, end: LatLng): Float {

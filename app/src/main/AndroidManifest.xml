@@ -58,6 +58,13 @@
             android:theme="@style/Theme.ARHUD"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".ConfigActivity"
+            android:exported="false"
+            android:label="Config"
+            android:theme="@style/Theme.ARHUD"
+            android:windowSoftInputMode="adjustResize" />
+
         <service
             android:name=".NavUpdateService"
             android:exported="false" />
