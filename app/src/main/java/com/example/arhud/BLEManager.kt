@@ -23,6 +23,19 @@ import java.util.UUID
 data class ImuData(val pitch: Int, val roll: Int, val yaw: Int)
 
 /**
+ * Data class representing real-time HUD telemetry for UI debug widgets.
+ */
+data class HudDebugData(
+    val arrowBearing: Float = 65535f,
+    val nextTurnAngle: Float = 65535f,
+    val carFacing: Float = 0f,
+    val distanceMeters: Int = 0,
+    val speedKmH: Int = 0,
+    val speedLimitKmH: Int = 0,
+    val signIndex: Int = 0
+)
+
+/**
  * BleManager
  *
  * Responsible for the wireless data link between the phone and the ESP32.
@@ -83,6 +96,29 @@ class BleManager private constructor(private val context: Context) {
 
     private val _imuData = MutableStateFlow<ImuData?>(null)
     val imuData = _imuData.asStateFlow()
+
+    private val _hudDebugData = MutableStateFlow(HudDebugData())
+    val hudDebugData = _hudDebugData.asStateFlow()
+
+    fun updateHudDebugData(
+        arrowBearing: Float,
+        nextTurnAngle: Float,
+        carFacing: Float,
+        distanceMeters: Int,
+        speedKmH: Int = 0,
+        speedLimitKmH: Int = 0,
+        signIndex: Int = 0
+    ) {
+        _hudDebugData.value = HudDebugData(
+            arrowBearing = arrowBearing,
+            nextTurnAngle = nextTurnAngle,
+            carFacing = carFacing,
+            distanceMeters = distanceMeters,
+            speedKmH = speedKmH,
+            speedLimitKmH = speedLimitKmH,
+            signIndex = signIndex
+        )
+    }
 
     private val _errors = MutableSharedFlow<String>()
     val errors = _errors.asSharedFlow()
@@ -389,7 +425,7 @@ class BleManager private constructor(private val context: Context) {
         speedLimitApp: Int = 0,
         lineData: ByteArray = ByteArray(3)
     ) {
-        val angle = arrowAngle.coerceIn(0, 3600)
+        val angle = arrowAngle.coerceIn(0, 0xFFFF)
         val dist = signDist.coerceIn(0, 0xFFFF)
         val lines = ByteArray(3)
         if (lineData.isNotEmpty()) {
@@ -424,7 +460,11 @@ class BleManager private constructor(private val context: Context) {
         speedLimitKmH: Int = 0,
         laneData: ByteArray = ByteArray(3)
     ) {
-        val scaledHeading = (heading * 10).toInt().coerceIn(0, 3600)
+        val scaledHeading = if (heading >= 65535f || heading < 0f) {
+            65535 // Out of bounds indicator (0xFFFF)
+        } else {
+            (heading * 10).toInt().coerceIn(0, 3600)
+        }
         sendDeviceDataFlow(
             id1 = 0x01,
             speedApp = speedKmH,
