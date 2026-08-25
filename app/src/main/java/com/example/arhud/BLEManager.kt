@@ -32,7 +32,9 @@ data class HudDebugData(
     val distanceMeters: Int = 0,
     val speedKmH: Int = 0,
     val speedLimitKmH: Int = 0,
-    val signIndex: Int = 0
+    val signIndex: Int = 0,
+    val imuYaw: Float = 0f,
+    val imuOffset: Float = 0f
 )
 
 /**
@@ -97,6 +99,11 @@ class BleManager private constructor(private val context: Context) {
     private val _imuData = MutableStateFlow<ImuData?>(null)
     val imuData = _imuData.asStateFlow()
 
+    private var rawYaw: Float? = null
+    private val _imuYawOffset = MutableStateFlow(0f)
+    val imuYawOffset = _imuYawOffset.asStateFlow()
+    private var pendingTargetHeading: Float? = null
+
     private val _hudDebugData = MutableStateFlow(HudDebugData())
     val hudDebugData = _hudDebugData.asStateFlow()
 
@@ -107,7 +114,9 @@ class BleManager private constructor(private val context: Context) {
         distanceMeters: Int,
         speedKmH: Int = 0,
         speedLimitKmH: Int = 0,
-        signIndex: Int = 0
+        signIndex: Int = 0,
+        imuYaw: Float = 0f,
+        imuOffset: Float = 0f
     ) {
         _hudDebugData.value = HudDebugData(
             arrowBearing = arrowBearing,
@@ -116,8 +125,34 @@ class BleManager private constructor(private val context: Context) {
             distanceMeters = distanceMeters,
             speedKmH = speedKmH,
             speedLimitKmH = speedLimitKmH,
-            signIndex = signIndex
+            signIndex = signIndex,
+            imuYaw = imuYaw,
+            imuOffset = imuOffset
         )
+    }
+
+    /**
+     * Offsets the incoming IMU yaw so that the current/calibrated IMU yaw matches the target heading (0..360° CW).
+     */
+    fun setImuOffsetToTargetHeading(targetHeadingCw: Float) {
+        val normalizedTarget = ((targetHeadingCw % 360f) + 360f) % 360f
+        val currentRaw = rawYaw
+        if (currentRaw != null) {
+            var offset = (normalizedTarget - currentRaw) % 360f
+            if (offset < 0) offset += 360f
+            _imuYawOffset.value = offset
+
+            val currentImu = _imuData.value
+            val pitch = currentImu?.pitch ?: 0
+            val roll = currentImu?.roll ?: 0
+            var calibratedYaw = (currentRaw + offset) % 360f
+            if (calibratedYaw < 0) calibratedYaw += 360f
+            _imuData.value = ImuData(pitch, roll, calibratedYaw.toInt())
+            Log.i(TAG, "setImuOffsetToTargetHeading: target=$normalizedTarget°, raw=$currentRaw°, offset=$offset°, calYaw=$calibratedYaw°")
+        } else {
+            pendingTargetHeading = normalizedTarget
+            Log.i(TAG, "setImuOffsetToTargetHeading: No raw IMU yet, pending target=$normalizedTarget°")
+        }
     }
 
     private val _errors = MutableSharedFlow<String>()
@@ -418,47 +453,35 @@ class BleManager private constructor(private val context: Context) {
             Log.w(TAG, "Received invalid frame sync: Header=0x${Integer.toHexString(header)}, Footer=0x${Integer.toHexString(footer)}")
             return
         }
+        // ESP32 Telemetry Frame (0xBD):
+        // data[2] = Heading MSB
+        // data[3] = Heading LSB (nav_heading in tenths of degree: (int)yaw * 10)
+        // data[4] = Reserved / Speed OBD
+        val headingMsb = data[2].toInt() and 0xFF
+        val headingLsb = data[3].toInt() and 0xFF
+        val navHeading = (headingMsb shl 8) or headingLsb
+        val incomingYaw = (navHeading / 10f) % 360f
+        rawYaw = incomingYaw
 
-        val cmd = data[1].toInt() and 0xFF
+        val pending = pendingTargetHeading
+        if (pending != null) {
+            pendingTargetHeading = null
+            setImuOffsetToTargetHeading(pending)
+        }
 
-        if (cmd == 0xBD) {
-            // ESP32 Telemetry Frame (0xBD):
-            // data[2] = Heading MSB
-            // data[3] = Heading LSB (nav_heading in tenths of degree: (int)yaw * 10)
-            // data[4] = Reserved / Speed OBD
-            val headingMsb = data[2].toInt() and 0xFF
-            val headingLsb = data[3].toInt() and 0xFF
-            val navHeading = (headingMsb shl 8) or headingLsb
-            val yaw = navHeading / 10
-            val speedObd = data[4].toInt() and 0xFF
+        val offset = _imuYawOffset.value
+        var calibratedYaw = (incomingYaw + offset) % 360f
+        if (calibratedYaw < 0) calibratedYaw += 360f
+        val yaw = calibratedYaw.toInt()
+        val speedObd = data[1].toInt() and 0xFF
 
-            Log.i(TAG, "ESP32 Frame 0xBD: NavHeading=$navHeading, Yaw=$yaw°, SpeedOBD=$speedObd")
+        Log.i(TAG, "ESP32 Frame 0xBD: RawYaw=$incomingYaw°, Offset=$offset°, CalYaw=$calibratedYaw°, SpeedOBD=$speedObd")
 
-            _imuData.value = ImuData(pitch = 0, roll = 0, yaw = yaw)
+        _imuData.value = ImuData(pitch = 0, roll = 0, yaw = yaw)
 
-            if (speedObd > 0) {
-                val currentDebug = _hudDebugData.value
-                _hudDebugData.value = currentDebug.copy(speedKmH = speedObd)
-            }
-        } else {
-            // Legacy 30-bit packed IMU format
-            val b1 = data[1].toInt() and 0xFF
-            val b2 = data[2].toInt() and 0xFF
-            val b3 = data[3].toInt() and 0xFF
-            val b4 = data[4].toInt() and 0xFF
-
-            val packed30bit = (b1 shl 24) or (b2 shl 16) or (b3 shl 8) or b4
-
-            val pitch10bit = (packed30bit shr 20) and 0x3FF
-            val roll10bit = (packed30bit shr 10) and 0x3FF
-            val yaw10bit = packed30bit and 0x3FF
-
-            val pitch = pitch10bit - 180
-            val roll = roll10bit - 180
-            val yaw = yaw10bit
-
-            Log.i(TAG, "ESP32 Packed IMU: Pitch=$pitch, Roll=$roll, Yaw=$yaw")
-            _imuData.value = ImuData(pitch, roll, yaw)
+        if (speedObd > 0) {
+            val currentDebug = _hudDebugData.value
+            _hudDebugData.value = currentDebug.copy(speedKmH = speedObd)
         }
     }
 

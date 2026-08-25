@@ -31,6 +31,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -117,13 +118,17 @@ class NavigationActivity : ComponentActivity() {
         navigationView.setSpeedometerEnabled(true)
         navigationView.setSpeedLimitIconEnabled(true)
 
-        // Capture 60 FPS vehicle facing from the map camera in real time
+        // Capture 60 FPS vehicle facing from the map camera in real time for simulation modes
         navigationView.getMapAsync { googleMap ->
             googleMap.setOnCameraMoveListener {
-                val cameraBearing = googleMap.cameraPosition.bearing
-                var ccwFacing = (360f - cameraBearing) % 360f
-                if (ccwFacing < 0) ccwFacing += 360f
-                NavUpdateService.lastKnownCarFacingCcw = ccwFacing
+                val prefs = getSharedPreferences("ar_hud_config", Context.MODE_PRIVATE)
+                val devMode = prefs.getInt("key_dev_mode_selected", 3)
+                if (devMode != 3) {
+                    val cameraBearing = googleMap.cameraPosition.bearing
+                    var ccwFacing = (360f - cameraBearing) % 360f
+                    if (ccwFacing < 0) ccwFacing += 360f
+                    NavUpdateService.lastKnownCarFacingCcw = ccwFacing
+                }
             }
         }
 
@@ -169,6 +174,9 @@ class NavigationActivity : ComponentActivity() {
                             debugData = debugData,
                             displayHudSimulator = displayHudSimulator,
                             devMode = devMode,
+                            onOffsetImu = {
+                                offsetImuToSimulationCarHeading()
+                            },
                             onStartNavigation = { destination ->
                                 startNavigation(destination)
                             },
@@ -276,6 +284,44 @@ class NavigationActivity : ComponentActivity() {
         })
     }
 
+    fun offsetImuToSimulationCarHeading() {
+        navigationView.getMapAsync { googleMap ->
+            val cameraBearing = googleMap.cameraPosition.bearing // 0..360 CW
+            var headingCw = cameraBearing
+
+            // Fall back to NavUpdateService.lastKnownCarFacingCcw if camera bearing is 0
+            if (headingCw == 0f && NavUpdateService.lastKnownCarFacingCcw != 0f) {
+                headingCw = (360f - NavUpdateService.lastKnownCarFacingCcw) % 360f
+            }
+
+            // Fall back to current route segment bearing if available
+            if (headingCw == 0f) {
+                val segment = navigator?.currentRouteSegment
+                val latLngs = segment?.latLngs
+                if (latLngs != null && latLngs.size >= 2) {
+                    val startLoc = Location("").apply {
+                        latitude = latLngs[0].latitude
+                        longitude = latLngs[0].longitude
+                    }
+                    val endLoc = Location("").apply {
+                        latitude = latLngs[1].latitude
+                        longitude = latLngs[1].longitude
+                    }
+                    var b = startLoc.bearingTo(endLoc)
+                    if (b < 0) b += 360f
+                    headingCw = b
+                }
+            }
+
+            if (headingCw < 0) headingCw += 360f
+            headingCw = headingCw % 360f
+
+            bleManager.setImuOffsetToTargetHeading(headingCw)
+            Toast.makeText(this, "IMU offset to car heading: ${headingCw.toInt()}°", Toast.LENGTH_SHORT).show()
+            Log.d("NavDebug", "Offset IMU to simulation car heading: $headingCw° CW")
+        }
+    }
+
     private fun startNavigation(destinationQuery: String) {
         val currentNavigator = navigator ?: run {
             Toast.makeText(this, "Navigator not initialized", Toast.LENGTH_SHORT).show()
@@ -309,6 +355,11 @@ class NavigationActivity : ComponentActivity() {
                         currentNavigator.simulator.simulateLocationsAlongExistingRoute(
                             SimulationOptions().speedMultiplier(0.8f)
                         )
+                        // Automatically offset IMU data to simulation car heading on start of navigation
+                        offsetImuToSimulationCarHeading()
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            offsetImuToSimulationCarHeading()
+                        }, 500L)
                         Toast.makeText(this, "Simulated Navigation Started", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(this, "Failed to start simulation route: $result", Toast.LENGTH_SHORT).show()
@@ -349,6 +400,13 @@ class NavigationActivity : ComponentActivity() {
                                 currentNavigator.simulator.unsetUserLocation()
                             }
                         } catch (ignored: Exception) {}
+                        // Automatically offset IMU data to simulation car heading only in simulation mode (Mode 2)
+                        if (devMode == 2) {
+                            offsetImuToSimulationCarHeading()
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                offsetImuToSimulationCarHeading()
+                            }, 500L)
+                        }
                         Toast.makeText(this, "Navigating to: $title", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(this, "Failed to calculate route: $result", Toast.LENGTH_SHORT).show()
@@ -553,13 +611,19 @@ class NavUpdateService : Service() {
                 // at the point of display/BLE transmission via currentSpeedKmH getter.
                 lastKnownSpeedMps = location.speed
 
-                // Initial/fallback simulated car bearing converted to CCW
-                if (location.hasBearing() && lastKnownCarFacingCcw == 0f) {
-                    var rawBearing = location.bearing
-                    if (rawBearing < 0) rawBearing += 360f
-                    var ccwFacing = (360f - rawBearing) % 360f
-                    if (ccwFacing < 0) ccwFacing += 360f
-                    lastKnownCarFacingCcw = ccwFacing
+                // Update car facing in CCW frame:
+                // In Normal mode (devMode == 3), continuously update from GPS bearing as the vehicle moves.
+                // In Simulation modes, set initial/fallback bearing.
+                val prefs = getSharedPreferences("ar_hud_config", Context.MODE_PRIVATE)
+                val devMode = prefs.getInt("key_dev_mode_selected", 3)
+                if (location.hasBearing()) {
+                    if (devMode == 3 || lastKnownCarFacingCcw == 0f) {
+                        var rawBearing = location.bearing
+                        if (rawBearing < 0) rawBearing += 360f
+                        var ccwFacing = (360f - rawBearing) % 360f
+                        if (ccwFacing < 0) ccwFacing += 360f
+                        lastKnownCarFacingCcw = ccwFacing
+                    }
                 }
             }
         })
@@ -663,12 +727,12 @@ class NavUpdateService : Service() {
         val devMode = prefs.getInt("key_dev_mode_selected", 3)
 
         // 1. Heading source:
-        // In Normal Mode (Mode 3), prioritize real device IMU yaw (from ESP32 BLE).
-        // In Simulated Modes (Mode 1 & 2), strictly follow simulated map camera facing without IMU influence.
+        // In Normal Mode (Mode 3), use calibrated device IMU yaw directly.
+        // In Simulated Modes (Mode 1 & 2), strictly follow simulated car facing (lastKnownCarFacingCcw).
         val effectiveCarFacingCcw = if (devMode == 3) {
             val imuYaw = bleManager.imuData.value?.yaw
             if (imuYaw != null) {
-                var ccw = (360f - imuYaw) % 360f
+                var ccw = imuYaw.toFloat() % 360f
                 if (ccw < 0) ccw += 360f
                 ccw
             } else {
@@ -711,7 +775,9 @@ class NavUpdateService : Service() {
             distanceMeters = NAV_distanceMeters,
             speedKmH = navSpeedKmH,
             speedLimitKmH = navSpeedLimitKmH,
-            signIndex = deviceSignIndex
+            signIndex = deviceSignIndex,
+            imuYaw = (bleManager.imuData.value?.yaw ?: 0).toFloat(),
+            imuOffset = bleManager.imuYawOffset.value
         )
 
         val arrowHeadingLog = if (NAV_heading >= 65535f) "65535 (Out of bounds)" else "%.1f°".format(NAV_heading)
@@ -895,6 +961,7 @@ fun NavigationContent(
     debugData: HudDebugData,
     displayHudSimulator: Boolean = true,
     devMode: Int = 3,
+    onOffsetImu: () -> Unit = {},
     onStartNavigation: (String) -> Unit,
     onExitNavigation: () -> Unit
 ) {
@@ -952,6 +1019,7 @@ fun NavigationContent(
             if (displayHudSimulator) {
                 HudArrowDebugWidget(
                     debugData = debugData,
+                    onOffsetImu = onOffsetImu,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(8.dp)
@@ -964,6 +1032,7 @@ fun NavigationContent(
 @Composable
 fun HudArrowDebugWidget(
     debugData: HudDebugData,
+    onOffsetImu: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isOutOfBounds = debugData.arrowBearing >= 65535f || debugData.distanceMeters > 25
@@ -1069,6 +1138,31 @@ fun HudArrowDebugWidget(
                 TelemetryRow("Car", "%.1f°".format(debugData.carFacing), Color.White)
                 TelemetryRow("Dist", "${debugData.distanceMeters} m", Color(0xFF00E5FF))
                 TelemetryRow("Sign", ManeuverMapper.getDeviceIconName(debugData.signIndex), Color(0xFFFFD54F))
+                if (debugData.imuOffset != 0f || debugData.imuYaw != 0f) {
+                    TelemetryRow("Offset", "${debugData.imuOffset.toInt()}°", Color(0xFFB388FF))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // ─── IMU Calibration / Offset Button ───
+            Button(
+                onClick = onOffsetImu,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(32.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF0078D7)
+                )
+            ) {
+                Text(
+                    text = "Offset IMU",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
             }
         }
     }
