@@ -52,8 +52,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -1036,9 +1038,21 @@ fun HudArrowDebugWidget(
     modifier: Modifier = Modifier
 ) {
     val isOutOfBounds = debugData.arrowBearing >= 65535f || debugData.distanceMeters > 25
-    val targetRotationAngle = if (!isOutOfBounds) -debugData.arrowBearing else 0f
+    val rawTargetAngle = if (!isOutOfBounds) -debugData.arrowBearing else 0f
+
+    var continuousTargetAngle by remember { mutableFloatStateOf(rawTargetAngle) }
+    var previousRawAngle by remember { mutableFloatStateOf(rawTargetAngle) }
+
+    LaunchedEffect(rawTargetAngle) {
+        var delta = (rawTargetAngle - previousRawAngle) % 360f
+        if (delta > 180f) delta -= 360f
+        if (delta < -180f) delta += 360f
+        continuousTargetAngle += delta
+        previousRawAngle = rawTargetAngle
+    }
+
     val animatedRotationAngle by animateFloatAsState(
-        targetValue = targetRotationAngle,
+        targetValue = continuousTargetAngle,
         animationSpec = tween(durationMillis = 90),
         label = "arrowRotation"
     )
